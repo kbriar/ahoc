@@ -1,0 +1,179 @@
+import numpy as np
+from numpy import False_
+import networkx as nx
+import matplotlib.pyplot as plt
+import pandas as pd
+import datetime
+import pytz
+
+class sv_graph:
+    current_time = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+
+    def __init__(self, data):
+        self.data   = data.copy()
+        self.hub_id = self.data.iloc[0,0]
+
+    def graph_generator(self):
+        main_data = self.data
+        main_data["weight_"] = main_data["weight_"].astype(float)
+        edge_list = list(zip(main_data["u"], main_data["v"], main_data["weight_"]))
+        G = nx.Graph()
+        G.add_weighted_edges_from(edge_list)
+        return G
+
+    def cluster_classi(self, x):
+        if x >= 10:
+            return "C1"
+        if 3 < x < 10:
+            return "C2"
+        return "C3"
+
+    def components_connected(self):
+        comps = list(nx.connected_components(self.graph_generator()))
+        return {i+1: comps[i] for i in range(len(comps))}
+
+    def cc_info(self):
+        cc_rows = []
+        GS = self.graph_generator()
+        for cid, nodes in self.components_connected().items():
+            sub = GS.subgraph(nodes)
+            size_km = round(sub.size(weight="weight")/1000, 2)
+            cls     = self.cluster_classi(size_km)
+            chain   = "Yes" if max(dict(sub.degree()).values()) == 2 else "No"
+
+            details = []
+            for u, v, w in sub.edges(data="weight"):
+                m = ((self.data.u==u)&(self.data.v==v))|((self.data.u==v)&(self.data.v==u))
+                for fpt in self.data.loc[m, "fprint"].unique():
+                    details.append((u, v, w, fpt))
+
+            cc_rows.append({
+                "cluster_id":     cid,
+                "cluster_classi": cls,
+                "size":           size_km,
+                "edges":          sub.number_of_edges(),
+                "nodes":          sub.number_of_nodes(),
+                "chain_test":     chain,
+                "temp_sub_graph": list(nodes),
+                "details":        details
+            })
+
+        return pd.DataFrame(cc_rows)
+
+    def framer(self, df_sum, df_count, full_cc):
+        country = self.hub_id.split("-")[1].split(".")[0]
+        frame = [self.hub_id, country]
+
+        # kms and counts
+        for cls in ["C1","C2","C3"]:
+            frame.append(round(df_sum.loc.get(cls, 0), 2))
+        for cls in ["C1","C2","C3"]:
+            frame.append(int(df_count.loc.get(cls, 0)))
+
+        # segments and segment counts
+        for cls in ["C1","C2","C3"]:
+            segs = {
+                (u, v)
+                for _, row in full_cc[full_cc.cluster_classi==cls].iterrows()
+                for (u, v, _, _) in row.details
+            }
+            frame.append(list(segs))
+            frame.append(len(segs))
+
+        return frame
+
+    def cc_output_info(self):
+        temp   = self.cc_info()
+        sums   = temp.groupby("cluster_classi")["size"].sum()
+        counts = temp.groupby("cluster_classi")["size"].count()
+        return self.framer(sums, counts, temp)
+
+    def cc_info_detail(self):
+        temp = self.cc_info()
+        gb   = temp.groupby(['nodes', 'classi'])['size'].sum()
+        return pd.DataFrame(gb)
+
+    def chain_tester(self, graph_v):
+        degs = [d for _,d in graph_v.degree()]
+        return "Yes" if max(degs)==2 else "No"
+
+    def descriptive_stats(self):
+        temp = self.cc_info()
+        c1    = temp[temp.chain_test=="Yes"].sort_values("size",ascending=False).iloc[0,3]
+        c2    = temp[(temp.chain_test=="No")&(temp.classi=="non")].sort_values("nodes",ascending=False).iloc[0,3]
+        c3cnt = temp[temp.classi=="single_road"].shape[0]
+        print("Highest Non Chain Cluster:", c2,"kms")
+        print("Longest Chain Road:", c1,"kms")
+        print("Single road Clusters:", c3cnt)
+
+    def main(self):
+        self.graph_info()
+        print(self.cc_info_detail())
+        print("------------ End of Program --------------")
+
+class Inititiator:
+    def __init__(self, file):
+        self.file = file
+
+    def hub_selector_list(self):
+        return list(self.file["hub_id"].unique())
+
+    def filter(self):
+        out = []
+        for hub in self.hub_selector_list():
+            df_hub = self.file[self.file["hub_id"] == hub]
+            out.append(sv_graph(df_hub).cc_output_info())
+        return out
+
+    def main_data_df(self):
+        data = self.filter()
+        cols = [
+            "hub_id", "country_code",
+            "C1_kms","C2_kms","C3_kms",
+            "C1_Count","C2_Count","C3_Count",
+            "C1_segments","C2_segments","C3_segments",
+            "C1_segment_count","C2_segment_count","C3_segment_count"
+        ]
+        return pd.DataFrame(data, columns=cols)
+
+    def details_df(self):
+        rows = []
+        for hub in self.file["hub_id"].unique():
+            sg = sv_graph(self.file[self.file["hub_id"] == hub])
+            cc = sg.cc_info()
+            for _, rec in cc.iterrows():
+                for (u, v, w, fpt) in rec["details"]:
+                    rows.append({
+                        "hub_id":        rec["hub_id"],
+                        "cluster_classi": rec["cluster_classi"],
+                        "u":             u,
+                        "v":             v,
+                        "weight":        w,
+                        "fprint":        fpt
+                    })
+        return pd.DataFrame(rows)
+
+    def export_to_excel(self, path="hub_summary.xlsx"):
+        s = self.main_data_df()
+        d = self.details_df()
+        with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
+            s.to_excel(writer, sheet_name="Summary", index=False)
+            d.to_excel(writer, sheet_name="Details", index=False)
+        return path
+
+# CSV DATA IMPORTER (modified)
+import warnings
+warnings.filterwarnings("ignore")
+
+# Read directly from CSV
+df = pd.read_csv("hub_data.csv")
+
+I1 = Inititiator(df)
+TS1 = I1.main_data_df()
+
+from colabtools import fileedit
+
+def downloadFile():
+    fname = input("Enter filename without extension: ")
+    path  = I1.export_to_excel(f"{fname}.xlsx")
+    fileedit.download_file(path)
