@@ -1,13 +1,9 @@
-import warnings
-warnings.filterwarnings("ignore")
-
 import numpy as np
 import networkx as nx
 import pandas as pd
 import datetime
 import pytz
 
-# Your sv_graph class with chain extraction
 class sv_graph:
     current_time = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
 
@@ -32,72 +28,112 @@ class sv_graph:
         return 'C3'
 
     def components_connected(self):
-        comps = list(nx.connected_components(self.graph_generator()))
+        G = self.graph_generator()
+        comps = list(nx.connected_components(G))
         return {i+1: comps[i] for i in range(len(comps))}
 
     def find_chains(self, subgraph):
-        chains = []
+        """
+        Find continuous chains in the subgraph.
+        Returns list of chains, each chain is a list of nodes in order.
+        Covers all edges by traversing from endpoints and cycles.
+        """
         G = subgraph.copy()
+        visited_edges = set()
+        chains = []
+
+        # Normalize edges as sorted tuples
+        def edge_tuple(u, v):
+            return tuple(sorted((u, v)))
+
+        # Find endpoints (degree 1) to start chains
         endpoints = [n for n, d in G.degree() if d == 1]
 
-        visited = set()
-
         def traverse_chain(start):
-            chain = [start]
+            chain_nodes = [start]
             current = start
             prev = None
             while True:
-                neighbors = list(G.neighbors(current))
-                if prev is not None:
-                    neighbors = [n for n in neighbors if n != prev]
+                neighbors = [n for n in G.neighbors(current) if n != prev]
                 if len(neighbors) == 1:
-                    next_node = neighbors[0]
-                    chain.append(next_node)
-                    prev = current
-                    current = next_node
+                    nxt = neighbors[0]
+                    chain_nodes.append(nxt)
+                    prev, current = current, nxt
                 else:
                     break
-            return chain
+            return chain_nodes
 
+        # Traverse chains starting from endpoints
         for ep in endpoints:
-            if ep not in visited:
-                chain = traverse_chain(ep)
-                chains.append(chain)
-                visited.update(chain)
+            # Check if edges in chain already visited
+            chain_nodes = traverse_chain(ep)
+            # Mark edges visited
+            for i in range(len(chain_nodes) - 1):
+                visited_edges.add(edge_tuple(chain_nodes[i], chain_nodes[i+1]))
+            chains.append(chain_nodes)
 
-        if not chains and len(G.nodes) > 0:
-            chains.append(list(G.nodes))
+        # For remaining edges (in cycles), find cycles and add as chains
+        remaining_edges = set(edge_tuple(u, v) for u, v in G.edges()) - visited_edges
+        while remaining_edges:
+            # Pick an edge
+            u, v = remaining_edges.pop()
+            # Find cycle containing this edge
+            try:
+                cycle_nodes = nx.find_cycle(G, source=u)
+                # cycle_nodes is list of edges, convert to node list
+                nodes_in_cycle = [cycle_nodes[0][0]] + [e[1] for e in cycle_nodes]
+                # Mark all cycle edges visited
+                for e in cycle_nodes:
+                    visited_edges.add(edge_tuple(e[0], e[1]))
+                    if e in remaining_edges:
+                        remaining_edges.remove(e)
+                    elif (e[1], e[0]) in remaining_edges:
+                        remaining_edges.remove((e[1], e[0]))
+                chains.append(nodes_in_cycle)
+            except nx.NetworkXNoCycle:
+                # No cycle, treat edge as single chain
+                chains.append([u, v])
+                visited_edges.add(edge_tuple(u, v))
 
         return chains
 
     def cc_info(self):
         rows = []
         G = self.graph_generator()
-        for cid, nodes in self.components_connected().items():
+        comps = self.components_connected()
+        for cid, nodes in comps.items():
             sub = G.subgraph(nodes)
-            size_km = round(sub.size(weight='weight')/1000, 2)
+            size_km = round(sub.size(weight='weight') / 1000, 2)
             cls = self.cluster_classi(size_km)
+
+            # Extract edges with normalized tuples
             details = []
             for u, v, w in sub.edges(data='weight'):
                 mask = ((self.data['u'] == u) & (self.data['v'] == v)) | ((self.data['u'] == v) & (self.data['v'] == u))
                 for fpt in self.data.loc[mask, 'fprint'].unique():
-                    details.append((u, v, w, fpt))
+                    # Normalize edge as sorted tuple
+                    edge_norm = tuple(sorted((u, v)))
+                    details.append((edge_norm[0], edge_norm[1], w, fpt))
 
-            chains = self.find_chains(sub)
-            chain_edges = []
-            for chain in chains:
-                chain_edges.append([(chain[i], chain[i+1]) for i in range(len(chain)-1)])
+            # Find chains (list of node sequences)
+            chains_nodes = self.find_chains(sub)
+            # Convert chains of nodes to chains of edges (normalized)
+            chains_edges = []
+            for chain in chains_nodes:
+                chain_edge_list = []
+                for i in range(len(chain) - 1):
+                    chain_edge_list.append(tuple(sorted((chain[i], chain[i+1]))))
+                chains_edges.append(chain_edge_list)
 
             rows.append({
-                'hub_id':        self.hub_id,
+                'hub_id': self.hub_id,
                 'cluster_classi': cls,
-                'size':           size_km,
-                'details':        details,
-                'chains':         chain_edges
+                'size': size_km,
+                'details': details,       # list of edges with weights and fprints
+                'chains': chains_edges   # list of chains, each chain is list of edges
             })
         return pd.DataFrame(rows)
 
-# Inititiator class with main_data_df alias
 class Inititiator:
     def __init__(self, df):
         self.df = df.copy()
@@ -112,69 +148,48 @@ class Inititiator:
             cc['hub_id'] = hub
             all_cc.append(cc)
         df_cc = pd.concat(all_cc, ignore_index=True)
+
         rows = []
         for hub, grp in df_cc.groupby('hub_id'):
-            country = hub.split('-')[1].split('.')[0]
-            row = {'hub_id': hub, 'country_code': country}
-            for cls in ['C1','C2','C3']:
+            row = {'hub_id': hub}
+            for cls in ['C1', 'C2', 'C3']:
                 sub = grp[grp.cluster_classi == cls]
-                row[f'{cls}_kms']   = sub['size'].sum()
+                # Sum of cluster sizes (kms)
+                row[f'{cls}_kms'] = sub['size'].sum()
+                # Count of clusters
                 row[f'{cls}_count'] = len(sub)
-                segs = {(u, v) for det in sub.details for (u, v, w, f) in det}
-                row[f'{cls}_segments'] = list(segs)
-                chains = []
-                for ch_list in sub['chains']:
-                    chains.extend(ch_list)
-                row[f'{cls}_chains'] = chains
+
+                # Unique segments (edges) across all clusters in this class
+                unique_segments = set()
+                for det in sub['details']:
+                    # det is list of (u,v,w,fpt)
+                    unique_segments.update((u, v) for u, v, w, fpt in det)
+                row[f'{cls}_segments'] = list(unique_segments)
+
+                # Flatten all chains (list of list of edges)
+                all_chains = []
+                for chains_list in sub['chains']:
+                    all_chains.extend(chains_list)
+                row[f'{cls}_chains'] = all_chains
+
+                # Optional: count of unique edges in chains (should be <= segments)
+                unique_chain_edges = set()
+                for chain in all_chains:
+                    unique_chain_edges.update(chain)
+                row[f'{cls}_chain_edge_count'] = len(unique_chain_edges)
+
             rows.append(row)
-        return pd.DataFrame(rows)
 
-    def details_df(self):
-        rows = []
-        for hub in self.df['hub_id'].unique():
-            sg = sv_graph(self.df[self.df['hub_id'] == hub])
-            cc = sg.cc_info()
-            for _, rec in cc.iterrows():
-                for u, v, w, fpt in rec['details']:
-                    rows.append({
-                        'hub_id':        rec.hub_id,
-                        'cluster_classi': rec.cluster_classi,
-                        'u':             u,
-                        'v':             v,
-                        'weight':        w,
-                        'fprint':        fpt
-                    })
         return pd.DataFrame(rows)
-
-    def export_to_excel(self, path='hub_summary.xlsx'):
-        s = self.summary_df()
-        d = self.details_df()
-        with pd.ExcelWriter(path, engine='xlsxwriter') as writer:
-            s.to_excel(writer, sheet_name='Summary', index=False)
-            d.to_excel(writer, sheet_name='Details', index=False)
-        return path
 
     def main_data_df(self):
         return self.summary_df()
 
-# Your data loading using colabtools f1
-from colabtools import f1
+# Example usage:
+# Assuming `df` is your DataFrame loaded from SQL or CSV with columns:
+# ['hub_id', 'fprint', 'u', 'v', 'weight_']
 
-ganpati_group = "svct-ops-access"
-f1.set_accounting_group(ganpati_group)
+# I = Inititiator(df)
+# summary = I.main_data_df()
+# print(summary)
 
-t1 = f1.Execute('''
-SELECT
-    driving_hub_id as hub_id,
-    fprint,
-    u,
-    v,
-    weight_
-FROM ambarishmohan.categorize_chain
-''')
-
-# Instantiate and get summary
-I1 = Inititiator(t1)
-TS1 = I1.main_data_df()
-
-print(TS1)
