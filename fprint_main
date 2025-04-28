@@ -69,7 +69,7 @@ class Initiator:
         self.df.weight_= self.df.weight_.astype(float)
 
     def summary_df(self):
-        # collect all component‐info tables
+        # collect all component-info tables
         cc_list = []
         for hub in self.df.hub_id.unique():
             sg = sv_graph(self.df[self.df.hub_id == hub])
@@ -85,24 +85,25 @@ class Initiator:
             for cls in ["C1", "C2", "C3"]:
                 sub = grp[grp.cluster_classi == cls]
 
-                # total kms and component count
-                row[f"{cls}_kms"]    = sub.size_km.sum()
-                row[f"{cls}_count"]  = sub.cluster_id.count()
+                # Safely sum size_km and count clusters
+                row[f"{cls}_kms"] = sub["size_km"].sum() if not sub.empty else 0
+                row[f"{cls}_count"] = sub["cluster_id"].count() if not sub.empty else 0
 
                 # --- segment lists: unique (u, v, weight) tuples ---
                 segs = {
                     (u, v, w)
                     for detail in sub.details
                     for (u, v, w, f) in detail
-                }
+                } if not sub.empty else set()
                 row[f"{cls}_segments"] = list(segs)
 
                 # --- fingerprints: count + list of (fprint, weight) ---
                 fp2w = {}
-                for detail in sub.details:
-                    for (u, v, w, f) in detail:
-                        fp2w[f] = w
-                row[f"{cls}_no_of_fprint"]    = len(fp2w)
+                if not sub.empty:
+                    for detail in sub.details:
+                        for (u, v, w, f) in detail:
+                            fp2w[f] = w
+                row[f"{cls}_no_of_fprint"] = len(fp2w)
                 row[f"{cls}_list_of_fprints"] = list(fp2w.items())
 
             rows.append(row)
@@ -139,17 +140,14 @@ class Initiator:
         return path
 
 
-# --- USAGE ---
-# df = pd.read_csv("hub_data.csv")  # or however you load it
-# I = Initiator(df)
-# file_path = I.export_to_excel("output.xlsx")
-# print("Wrote:", file_path)
-#
-# # Then you can use your Colab downloader:
-# from colabtools import fileedit
-# fileedit.download_file(file_path)
-df = pd.read_csv("C:/Users/visha/Downloads/hub_data.csv")
+# -------------------
+# USAGE EXAMPLE:
+
+# 1. Load your CSV or DataFrame (replace with your actual data source)
+# df = pd.read_csv("hub_data.csv")
 
 # 2. Instantiate Initiator and export
-I = Initiator(df)
-I.export_to_excel("C:/Users/visha/Downloads/output12.xlsx")
+# I = Initiator(df)
+# out_path = I.export_to_excel("output.xlsx")
+# print("Written to", out_path)
+
