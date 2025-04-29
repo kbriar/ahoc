@@ -1,0 +1,112 @@
+import pandas as pd
+import networkx as nx
+import datetime
+import pytz
+
+class sv_graph:
+    current_time = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
+
+    def __init__(self, data):
+        self.data = data.copy()
+        self.data['u'] = self.data['u'].astype(str)
+        self.data['v'] = self.data['v'].astype(str)
+        self.data['weight_'] = self.data['weight_'].astype(float)
+        self.hub_id = self.data.iloc[0]['hub_id']
+
+    def graph_generator(self):
+        edges = list(zip(self.data['u'], self.data['v'], self.data['weight_']))
+        G = nx.Graph()
+        G.add_weighted_edges_from(edges)
+        return G
+
+    def cluster_classi(self, km):
+        if km >= 10:
+            return 'C1'
+        if 3 < km < 10:
+            return 'C2'
+        return 'C3'
+
+    def cc_info(self):
+        G = self.graph_generator()
+        clusters = []
+        for cid, comp in enumerate(nx.connected_components(G), start=1):
+            sub = G.subgraph(comp)
+            size_km = round(sub.size(weight='weight')/1000, 2)
+            cls = self.cluster_classi(size_km)
+            edges = [(u, v, w) for u, v, w in sub.edges(data='weight')]
+            clusters.append({
+                'hub_id':         self.hub_id,
+                'cluster_id':     cid,
+                'cluster_classi': cls,
+                'size_km':        size_km,
+                'edges':          edges
+            })
+        return pd.DataFrame(clusters)
+
+class Initiator:
+    def __init__(self, df):
+        self.df = df.copy()
+        if 'driving_hub_id' in self.df.columns:
+            self.df.rename(columns={'driving_hub_id':'hub_id'}, inplace=True)
+
+    def summary_df(self):
+        rows = []
+        for hub in self.df['hub_id'].unique():
+            df_hub = self.df[self.df['hub_id']==hub]
+            cc = sv_graph(df_hub).cc_info()
+            country = hub.split('-')[1].split('.')[0]
+            row = {'hub_id':hub, 'country_code':country}
+            for cls in ['C1','C2','C3']:
+                sub = cc[cc.cluster_classi==cls]
+                # kms & cluster count
+                row[f'{cls}_kms']   = sub['size_km'].sum()
+                row[f'{cls}_count'] = len(sub)
+                # segments: flatten list of triples
+                segs = []
+                for ed_list in sub['edges']:
+                    segs.extend(ed_list)
+                row[f'{cls}_segments'] = segs
+                # fprint list & count
+                raw_fps = []
+                for u, v, w in segs:
+                    mask = ((df_hub['u']==u)&(df_hub['v']==v))|((df_hub['u']==v)&(df_hub['v']==u))
+                    raw_fps.extend(df_hub.loc[mask, 'fprint'].tolist())
+                # dedupe preserving order
+                unique_fps = list(dict.fromkeys(raw_fps))
+                row[f'{cls}_list_of_fprints'] = unique_fps
+                row[f'{cls}_no_of_fprint']      = len(unique_fps)
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def details_df(self):
+        rows = []
+        for hub in self.df['hub_id'].unique():
+            df_hub = self.df[self.df['hub_id']==hub]
+            cc = sv_graph(df_hub).cc_info()
+            for _, rec in cc.iterrows():
+                for u, v, w in rec['edges']:
+                    mask = ((df_hub['u']==u)&(df_hub['v']==v))|((df_hub['u']==v)&(df_hub['v']==u))
+                    for fpt in df_hub.loc[mask, 'fprint'].unique():
+                        rows.append({
+                            'hub_id':        rec['hub_id'],
+                            'cluster_id':    rec['cluster_id'],
+                            'cluster_classi':rec['cluster_classi'],
+                            'u':             u,
+                            'v':             v,
+                            'weight':        w,
+                            'fprint':        fpt
+                        })
+        return pd.DataFrame(rows)
+
+    def export_to_excel(self, path='hub_summary.xlsx'):
+        summary = self.summary_df()
+        details = self.details_df()
+        with pd.ExcelWriter(path, engine='xlsxwriter') as writer:
+            summary.to_excel(writer, sheet_name='Summary', index=False)
+            details.to_excel(writer, sheet_name='Details', index=False)
+        return path
+
+
+df = pd.read_csv("C:/Users/visha/Downloads/hub_data.csv")
+I = Initiator(df)
+I.export_to_excel("C:/Users/visha/Downloads/29_outputff_4_set.xlsx")
