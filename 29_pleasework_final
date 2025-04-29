@@ -46,6 +46,16 @@ class sv_graph:
 class Initiator:
     def __init__(self, df):
         self.df = df.copy()
+        # ensure hub_id column and types for u, v, weight_
+        if 'driving_hub_id' in self.df.columns:
+            self.df.rename(columns={'driving_hub_id':'hub_id'}, inplace=True)
+        # cast u/v to string so masks match
+        if 'u' in self.df.columns:
+            self.df['u'] = self.df['u'].astype(str)
+        if 'v' in self.df.columns:
+            self.df['v'] = self.df['v'].astype(str)
+        if 'weight_' in self.df.columns:
+            self.df['weight_'] = self.df['weight_'].astype(float)
         if 'driving_hub_id' in self.df.columns:
             self.df.rename(columns={'driving_hub_id':'hub_id'}, inplace=True)
 
@@ -106,7 +116,26 @@ class Initiator:
             details.to_excel(writer, sheet_name='Details', index=False)
         return path
 
+# SQL DATA IMPORTER
+import warnings
+warnings.filterwarnings('ignore')
+from colabtools import f1
 
-df = pd.read_csv("C:/Users/visha/Downloads/hub_data.csv")
+ganpati_group = 'svct-ops-access'
+f1.set_accounting_group(ganpati_group)
+
+df = f1.Execute('''
+SELECT
+    driving_hub_id as hub_id,
+    fprint,
+    u,
+    v,
+    weight_
+FROM ambarishmohan.categorize_chain
+''')
+
+# run
 I = Initiator(df)
-I.export_to_excel("C:/Users/visha/Downloads/29_outputff_4_set.xlsx")
+print(I.summary_df())
+path = I.export_to_excel('hub_summary.xlsx')
+print('Saved workbook with Summary & Details at', path)
